@@ -1,0 +1,360 @@
+#!/usr/bin/env python3
+
+import argparse
+import subprocess
+import json
+import os
+
+GH_REPO_NAME = ""
+CONTAINER_IMAGE_DOMAIN = ""
+CONTAINER_IMAGE_PATH = ""
+BUILD_APP_PATH = ""
+CONTAINER_COMMAND = "docker"
+
+# Functions to handle versioning and GitHub releases
+# This script is used to increment version numbers and create GitHub releases.
+# It can increment the major, minor, or patch version based on the provided arguments.
+# It also retrieves the last Git tag from GitHub and creates a new release if specified.
+
+def parse_arguments():
+  parser = argparse.ArgumentParser(description="Version incrementer")
+  parser.add_argument(
+    "--gh-repo-name", type=str, help="Specify the application name (default: opsrun-api)"
+  )
+  parser.add_argument(
+    "--increase-patch", action="store_true", help="Increment the patch version"
+  )
+  parser.add_argument(
+    "--increase-minor", action="store_true", help="Increment the minor version"
+  )
+  parser.add_argument(
+    "--increase-major", action="store_true", help="Increment the major version"
+  )
+  parser.add_argument(
+    "--version", type=str, help="Specify a custom version string (format: X.Y.Z)"
+  )
+  parser.add_argument(
+    "--create-release", action="store_true", help="Create a new release after version increment"
+  )
+  parser.add_argument(
+    "--create-image", type=str, help="Create an image with a provided Dockerfile path: Example --create-image ./Dockerfile-Release"
+  )
+  parser.add_argument(
+    "--container-registry-domain", type=str, help="Specify the container registry domain to build and tag image (e.g., ghcr.io)"
+  )
+  parser.add_argument(
+    "--container-registry-path", type=str, help="Specify the container registry path to build and tag image (e.g., opsrun/opsrun-api)"
+  )
+  parser.add_argument(
+    "--go-build", action="store_true", help="Build the golang application before creating a release or image"
+  )
+  parser.add_argument(
+    "--gh-token", type=str, help="GitHub token for authentication (optional, uses GH_TOKEN env variable if not provided)"
+  )
+  parser.add_argument(
+    "--podman", action="store_true", help="Use Podman instead of Docker for container commands"
+  )
+  return parser.parse_args()
+
+args = parse_arguments()
+# Check if no arguments were provided
+if any(vars(args).values()) == False:
+  print("No arguments provided. Use --help to see available options.")
+  exit(0)
+
+############################################################################################
+# Set default values for arguments if not provided
+
+if args.gh_repo_name != None:
+  GH_REPO_NAME = args.gh_repo_name
+  BUILD_APP_PATH = f"./build/{GH_REPO_NAME}"
+else:
+  print("You must provide an application name using --gh-repo-name")
+  exit(1)
+
+if args.podman:
+  CONTAINER_COMMAND = "podman"
+
+if args.container_registry_path != None:
+    CONTAINER_IMAGE_PATH = f"{args.container_registry_path}/"
+    
+if args.container_registry_domain != None:
+  CONTAINER_IMAGE_DOMAIN = f"{args.container_registry_domain}/{CONTAINER_IMAGE_PATH}{GH_REPO_NAME}"
+else:
+  CONTAINER_IMAGE_DOMAIN = f"localhost/{CONTAINER_IMAGE_PATH}{GH_REPO_NAME}"
+
+if args.gh_token != None:
+  GH_TOKEN = args.gh_token
+else:
+  print("You must provide a GitHub token using --gh-token")
+  exit(1)
+############################################################################################
+
+# Check if gh is installed
+try:
+  subprocess.run(["gh", "--version"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+except FileNotFoundError:
+  print("The GitHub CLI (gh) command is not installed. Please install it to use this script.")
+  exit(1)
+
+# Check if container command is installed
+try:
+  subprocess.run([CONTAINER_COMMAND, "--version"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+except FileNotFoundError:
+  print(f"The {CONTAINER_COMMAND} command is not installed. Please install it to use this script.")
+  exit(1)
+
+# Check if go is installed
+try:
+  subprocess.run(["go", "version"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+except FileNotFoundError:
+  print(f"The go command is not installed. Please install it to use this script.")
+  exit(1)
+############################################################################################
+
+def split_numbers(version: str) -> tuple[int, int, int]:
+
+  if version.startswith('v'):
+    version = version[1:]
+
+  # Split the version string into its components
+  parts = version.split('.')
+  if len(parts) != 3:
+      raise ValueError("Version must be in the format X.Y.Z")
+  
+  major, minor, patch = parts
+  return int(major), int(minor), int(patch)
+
+def increment_patch(version: str) -> str:
+  # Increment the patch version
+  major, minor, patch = split_numbers(version)
+  patch += 1
+  return return_version(major, minor, patch)
+
+def increment_minor(version: str) -> str:
+  # Increment the minor version and reset patch to 0
+  major, minor, patch = split_numbers(version)
+  minor += 1
+  patch = patch
+  return return_version(major, minor, patch)
+
+def increment_major(version: str) -> str:
+  # Increment the major version and reset minor and patch to 0
+  major, minor, patch = split_numbers(version)
+  major += 1
+  minor = minor
+  patch = patch
+  return return_version(major, minor, patch)
+
+def return_version(major: int, minor: int, patch: int) -> str:
+  return f"v{major}.{minor}.{patch}"
+
+def get_last_git_tag() -> str:
+  try:
+    # Run the git command to get the latest tag
+    result = subprocess.run(
+      ["gh", "release", "list", "--json=isLatest,tagName"],
+      stdout=subprocess.PIPE,
+      stderr=subprocess.PIPE,
+      text=True,
+      check=True
+    )
+
+    jsonStdout = json.loads(result.stdout)
+    if not jsonStdout:
+      print("No tags found.")
+      latestTag = ""
+
+    # Find the latest tag
+    for tag in jsonStdout:
+      if tag['isLatest']:
+        latestTag = tag['tagName']
+        break
+    else:
+      print("No latest tag found.")
+      latestTag = ""
+
+    return latestTag
+  
+  except subprocess.CalledProcessError as e:
+    raise RuntimeError(f"Failed to get the last git tag: {e.stderr.strip()}")
+
+def create_release(version: str) -> None:
+  
+  # Run the gh command to create a new release
+  result = subprocess.run(
+    ["gh", "release", "create", version, "-t", version, "--generate-notes", "--target", "main"],
+    check=True,
+    capture_output=True,
+    text=True
+  )
+  if result.returncode == 0:
+    print()
+    print(f"Release created successfully: " + version)
+    print(result.stdout.strip())
+  else:
+    print()
+    print("An error occurred while creating the release:")
+    print(result.stderr.strip())
+  
+  if args.go_build:
+    result = subprocess.run(
+      ["gh", "release", "upload", version, "--clobber", f"{BUILD_APP_PATH}-latest", f"{BUILD_APP_PATH}-{version}"],
+      check=True,
+      capture_output=True,
+      text=True
+    )
+    if result.returncode == 0:
+      print()
+      print(f"Release uploaded successfully: {BUILD_APP_PATH}, {BUILD_APP_PATH}-{version}")
+      print(result.stdout.strip())
+    else:
+      print()
+      print("An error occurred while creating the release:")
+      print(result.stderr.strip())
+
+def build_golang_app(gh_last_tag: str, gh_token: str) -> None:
+  
+  print("Building the Go versioned application...")
+  # Run the go build command to build the Go application
+  result = subprocess.run(
+    ["go", "build", "-o", BUILD_APP_PATH+"-"+gh_last_tag, "."],
+    check=True,
+    capture_output=True,
+    text=True,
+    env={"GOOS": "linux", "GOARCH": "amd64", "CGO_ENABLED": "0", "GH_TOKEN": gh_token, **os.environ}  # Ensure the environment is set correctly for cross-compilation
+  )
+
+  print("Building the Go latest application...")
+  result = subprocess.run(
+    ["go", "build", "-o", BUILD_APP_PATH+"-latest", "."],
+    check=True,
+    capture_output=True,
+    text=True,
+    env={"GOOS": "linux", "GOARCH": "amd64", "CGO_ENABLED": "0", "GH_TOKEN": gh_token, **os.environ}  # Ensure the environment is set correctly for cross-compilation
+  )
+  
+  if result.returncode == 0:
+    print("Go application built successfully.")
+    print(result.stdout.strip())
+  else:
+    print("An error occurred while building the Go application:")
+    print(result.stderr.strip())
+
+def create_container_image(version: str, dockerfile_path: str) -> None:
+  # Run the docker command to build the container image
+
+  print(f"=========================================")
+  print(f"Creating versioned image: {CONTAINER_IMAGE_DOMAIN}:{version} ...")
+  print(f"=========================================")
+  latest_result = subprocess.run(
+    [CONTAINER_COMMAND, "build", 
+      "--no-cache", 
+      "--build-arg", "GH_TOKEN="+GH_TOKEN, 
+      "--build-arg", "GH_REPO_NAME="+GH_REPO_NAME, 
+      "--build-arg", "GH_RELEASE_VERSION="+version, 
+      "--build-arg", "TAG_VERSION="+version, 
+      "-t", f"{CONTAINER_IMAGE_DOMAIN}:{version}",
+      ".",
+      "-f", dockerfile_path
+    ],
+    check=True,
+    capture_output=True,
+    text=True
+  )
+  if latest_result.returncode == 0:
+    print(f"Container image created successfully: {GH_REPO_NAME}:{version}")
+    print(latest_result.stdout.strip())
+  else:
+    print("An error occurred while creating the container image:")
+    print(latest_result.stderr.strip())
+
+  print()
+  print(f"=========================================")
+  print(f"Creating latest image: {CONTAINER_IMAGE_DOMAIN}:latest ...")
+  print(f"=========================================")
+  versioned_result = subprocess.run(
+    [CONTAINER_COMMAND, "build", 
+      "--no-cache", 
+      "--build-arg", "GH_TOKEN="+GH_TOKEN,
+      "--build-arg", "GH_REPO_NAME="+GH_REPO_NAME, 
+      "--build-arg", "GH_RELEASE_VERSION="+version, 
+      "--build-arg", "TAG_VERSION="+"latest", 
+      "-t", f"{CONTAINER_IMAGE_DOMAIN}:latest",
+      ".",
+      "-f", dockerfile_path
+    ],
+    check=True,
+    capture_output=True,
+    text=True
+  )
+  if versioned_result.returncode == 0:
+    print(f"Container image created successfully: {GH_REPO_NAME}:latest")
+    print(versioned_result.stdout.strip())
+  else:
+    print("An error occurred while creating the container image:")
+    print(versioned_result.stderr.strip())
+
+  env_file_path = os.path.join(".", ".env")
+  try:
+    with open(env_file_path, "w") as env_file:
+      env_file.write(f"IMAGE_VERSION={version}\n")
+    print(f".env file created successfully at {env_file_path} with IMAGE_VERSION={version}")
+  except Exception as e:
+    print(f"An error occurred while creating the .env file: {e}")
+
+    
+def main():
+
+  gh_last_tag = get_last_git_tag()
+  keep_gh_last_tag = gh_last_tag
+
+  # If no tag is found, we can create a new release with a default version
+  if gh_last_tag == "":
+    if args.create_release is True:
+      gh_last_tag = "v0.0.1"
+    print("No tag found in GitHub. Please create a tag first.")
+    print("Creating a new release with default version v0.0.1")
+
+  # If a version is specified, use it instead of the last tag
+  if args.version != None:
+    version = args.version
+    print("Creating release for version:", version)
+    gh_last_tag = version
+  
+  # If no version is specified, increment the last tag based on the provided arguments
+  if args.increase_patch:
+    gh_last_tag = increment_patch(gh_last_tag)
+    print("Incrementing patch version:", gh_last_tag)
+  
+  if args.increase_minor:
+    gh_last_tag = increment_minor(gh_last_tag)
+    print("Incrementing patch version:", gh_last_tag)
+  
+  if args.increase_major:
+    gh_last_tag = increment_major(gh_last_tag)
+    print("Incrementing patch version:", gh_last_tag)
+
+  if args.go_build:
+    print("Building the application before creating a release or image...")
+    build_golang_app(gh_last_tag, GH_TOKEN)
+
+  # If no increment arguments were provided, just use the last tag
+  if args.create_release is True:
+    # If the last tag is the same as the incremented version, skip creating a release
+    if gh_last_tag == keep_gh_last_tag:
+      print("No version increment detected. Skipping release creation.")
+      return
+
+    # Create a release with the incremented version
+    print("Creating release for version:", gh_last_tag)
+    create_release(gh_last_tag)
+  
+  if args.create_image != None:
+    dockerfile_path = args.create_image
+    create_container_image(gh_last_tag, dockerfile_path)
+
+  return
+
+if __name__ == "__main__":
+  main()
