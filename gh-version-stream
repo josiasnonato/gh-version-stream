@@ -5,7 +5,7 @@ import subprocess
 import json
 import os
 
-GH_REPO_NAME = ""
+GH_REPO_NAME = os.path.basename(os.getcwd())
 CONTAINER_IMAGE_DOMAIN = ""
 CONTAINER_IMAGE_PATH = ""
 BUILD_APP_PATH = ""
@@ -18,9 +18,6 @@ CONTAINER_COMMAND = "docker"
 
 def parse_arguments():
   parser = argparse.ArgumentParser(description="Version incrementer")
-  parser.add_argument(
-    "--gh-repo-name", type=str, help="Specify the application name (default: opsrun-api)"
-  )
   parser.add_argument(
     "--increase-patch", action="store_true", help="Increment the patch version"
   )
@@ -64,14 +61,6 @@ if any(vars(args).values()) == False:
 
 ############################################################################################
 # Set default values for arguments if not provided
-
-if args.gh_repo_name != None:
-  GH_REPO_NAME = args.gh_repo_name
-  BUILD_APP_PATH = f"./build/{GH_REPO_NAME}"
-else:
-  print("You must provide an application name using --gh-repo-name")
-  exit(1)
-
 if args.podman:
   CONTAINER_COMMAND = "podman"
 
